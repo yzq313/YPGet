@@ -24,22 +24,35 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK platform
+      - name: Install Android SDK manually
         shell: bash
+        env:
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
-          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+          mkdir -p "$ANDROID_SDK_ROOT"
 
-          # 接受 Android SDK 许可，避免 sdkmanager 因 License 未接受而失败
-          yes | sdkmanager --licenses >/dev/null || true
+          cd /tmp
+          curl -fsSL \
+            -o commandlinetools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
 
-          # 显式安装 Android 36 所需组件
-          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          rm -rf "$ANDROID_SDK_ROOT/cmdline-tools"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          unzip -q commandlinetools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+
+          # 最新结构要求放在 cmdline-tools/latest
+          if [ -d "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" ]; then
+            mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          fi
+
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
 
       - name: Install TurboDL
         shell: bash
