@@ -649,24 +649,7 @@ fun SettingsScreen(
             onClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) }
         )
 
-        Spacer(modifier = Modifier.height(24.dp))
 
-        SectionLabel("关于")
-        SettingsItem(
-            icon = Icons.Outlined.Info,
-            title = "关于云取",
-            description = "版本信息、支持平台与技术说明",
-            onClick = onAboutClick,
-            onLongClick = { showDevMenu = true } // 长按打开隐藏开发调试菜单
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-        SettingsItem(
-            icon = Icons.Outlined.VolunteerActivism,
-            title = "支持开发",
-            description = "微信扫码捐赠，支持项目持续维护",
-            onClick = onSupportClick
-        )
     }
 
     // 导出日志方式选择弹窗
