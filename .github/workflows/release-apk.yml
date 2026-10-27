@@ -1,0 +1,73 @@
+name: Build and upload APK
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      # 检出这个 Release 对应的标签
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK platform
+        run: sdkmanager "platforms;android-36"
+
+      # 当前 main 分支使用 TurboDL 0.2.4.0
+      - name: Install TurboDL
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=0.2.4.0
+          url="https://github.com/jiayuxuan123/TurboDL/releases/download/v${version}/TurboDL-v${version}-mavenLocal.zip"
+
+          curl --fail --location --retry 3 "$url" -o /tmp/turbodl.zip
+
+          mkdir -p "$HOME/.m2/repository/dev/turbodl"
+          unzip -q /tmp/turbodl.zip -d "$HOME/.m2/repository/dev/turbodl"
+
+          test -f "$HOME/.m2/repository/dev/turbodl/turbodl-core/${version}/turbodl-core-${version}.pom"
+
+      - name: Build debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload APK to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          apks=(app/build/outputs/apk/debug/*.apk)
+
+          if ((${#apks[@]} == 0)); then
+            echo "没有找到生成的 APK"
+            exit 1
+          fi
+
+          gh release upload "$RELEASE_TAG" "${apks[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
