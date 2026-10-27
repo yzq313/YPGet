@@ -13,7 +13,6 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      # 检出这个 Release 对应的标签
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
@@ -33,16 +32,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
 
-          # 接受 SDK 许可证，避免因未接受许可导致 sdkmanager 失败
+          # 接受 Android SDK 许可，避免 sdkmanager 因 License 未接受而失败
           yes | sdkmanager --licenses >/dev/null || true
 
           # 显式安装 Android 36 所需组件
           sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
-      # 当前 main 分支使用 TurboDL 0.2.4.0
       - name: Install TurboDL
         shell: bash
         run: |
