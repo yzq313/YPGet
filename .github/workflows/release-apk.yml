@@ -29,7 +29,18 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK platform
-        run: sdkmanager "platforms;android-36"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+
+          # 接受 SDK 许可证，避免因未接受许可导致 sdkmanager 失败
+          yes | sdkmanager --licenses >/dev/null || true
+
+          # 显式安装 Android 36 所需组件
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       # 当前 main 分支使用 TurboDL 0.2.4.0
       - name: Install TurboDL
