@@ -376,12 +376,16 @@ class LanzouApi(
     /** A1/A2：获取分享页并解析（文件夹分享 / 文件分享）。 */
     suspend fun resolveShare(shareUrl: String, pwd: String?): LanzouSharePage = withContext(Dispatchers.IO) {
         val normalized = LanzouConstants.normalizeShareUrl(shareUrl)
-        val html = fetchPageFollowingLanzou(normalized)
+        var html = fetchPageFollowingLanzou(normalized)
+        // 带提取码却在密码页：先把码提交给分享页解锁（否则后面拿到的参数来自密码页，
+        // 分页/取链全都会失败）。解锁失败就按原样继续，让上层给出准确报错。
+        if (!pwd.isNullOrBlank() && isLockedSharePage(html)) {
+            unlockSharePage(normalized, pwd)?.let { html = it }
+        }
         val uri = URI(normalized)
         val origin = "${uri.scheme}://${uri.host}"
         val title = extractTitle(html)
-        val needsPwd = html.contains("请输入密码") || html.contains("id=\"pwbox\"") ||
-            html.contains("input_password") || html.contains("密码不正确")
+        val needsPwd = isLockedSharePage(html)
         val isFolder = html.contains("filemoreajax") || html.contains("class=\"filemore\"") ||
             html.contains("file_more")
         val iframeUrl = Regex("""<iframe[^>]+src=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
@@ -439,6 +443,15 @@ class LanzouApi(
             // 子目录要先列出来：它们只在页面 HTML 上，不在分页结果里
             all += parseSubFolders(baseHtml)
             val seen = all.map { it.fid }.toMutableSet()
+            // 分页请求实际要带的提取码。
+            //
+            // 【为什么要可变、且允许置空】分享页在浏览器里输过密码之后，服务端已经用 Cookie
+            // 记住了解锁状态；此时 filemoreajax 再收到 pwd 反而返回 zt=3（密码错误）。
+            // 实测受害者是"个人网盘 → 文件夹 → 下载文件夹"：这条链路的分享是自己刚创建的，
+            // 用户根本没有输入过什么提取码，却弹出「蓝奏提取码错误，请检查后重新解析」。
+            // 现在遇到 zt=3 先用空提取码重试一次，多数情况就正常了。
+            var pwdToSend = pwd.orEmpty()
+            var rateLimitRetries = 0
             var pg = 1
             while (pg <= LanzouConstants.MAX_FOLDER_PAGES) {
                 var attempt = 0
@@ -452,7 +465,7 @@ class LanzouApi(
                                 "fid" to params.fid,
                                 "t" to params.t,
                                 "k" to params.k,
-                                "pwd" to pwd.orEmpty(),
+                                "pwd" to pwdToSend,
                                 "pg" to pg.toString()
                             ),
                             referer = page.shareUrl,
@@ -469,16 +482,32 @@ class LanzouApi(
                 }
                 val body = json ?: break
                 val zt = body.optInt("zt", 0)
-                when (zt) {
-                    1 -> {}
-                    2 -> return@withContext all
-                    3 -> throw IllegalStateException("蓝奏提取码错误，请检查后重新解析")
-                    4 -> {
-                        pg--
-                        if (attempt >= 2) throw IllegalStateException("蓝奏请求过于频繁，请稍后再试")
+                // 决策抽成纯函数（folderPageAction）：这些组合是用户实际踩到的那几种，
+                // 放在 HTTP 循环里既难读也难测。这里只负责把决策落成动作。
+                when (folderPageAction(zt, firstPageDone = pg > 1, pwdPresent = pwdToSend.isNotEmpty())) {
+                    FolderPageAction.NEXT -> {}
+                    FolderPageAction.DONE -> {
+                        if (zt == 2) return@withContext all
+                        break
                     }
-                    else -> throw IllegalStateException("蓝奏解析失败，请确认分享链接和提取码后重试")
+                    FolderPageAction.RETRY_WITHOUT_PWD -> {
+                        // 已解锁的分享再带提取码会被判"密码错误"（见 pwdToSend 的说明）。
+                        pwdToSend = ""
+                        continue
+                    }
+                    FolderPageAction.RETRY_LATER -> {
+                        rateLimitRetries++
+                        if (rateLimitRetries > 2) throw IllegalStateException("蓝奏请求过于频繁，请稍后再试")
+                        delay(800)
+                    }
+                    FolderPageAction.FAIL_PWD ->
+                        throw IllegalStateException("蓝奏提取码错误，请检查后重新解析")
+                    FolderPageAction.FAIL_BUSY ->
+                        throw IllegalStateException("蓝奏请求过于频繁，请稍后再试")
+                    FolderPageAction.FAIL_OTHER ->
+                        throw IllegalStateException("蓝奏解析失败，请确认分享链接和提取码后重试")
                 }
+
                 val arr = body.optJSONArray("text")
                 if (arr == null || arr.length() == 0) break
                 var added = 0
@@ -532,8 +561,11 @@ class LanzouApi(
 
             // ① 定位「这个文件自己的页面」
             val childPageUrl = downloadPageUrlFor(page, file)
-            val entryHtml = childPageUrl?.let { fetchPageFollowingLanzou(it) } ?: page.html
+            var entryHtml = childPageUrl?.let { fetchPageFollowingLanzou(it) } ?: page.html
             val entryUrl = childPageUrl ?: page.shareUrl
+            if (withPwd && isLockedSharePage(entryHtml)) {
+                unlockSharePage(entryUrl, pwd!!)?.let { entryHtml = it }
+            }
             LanzouLog.note(
                 if (childPageUrl != null) "取链：文件页 $origin${URI(childPageUrl).path.orEmpty()}（文件夹分享）"
                 else "取链：分享页 ${URI(entryUrl).path.orEmpty()}（单文件分享）"
@@ -590,7 +622,7 @@ class LanzouApi(
             LanzouLog.note(
                 "取链：提交 ${URI(ajaxUrl).path.orEmpty()}（${if (declared != null) "参数取自页面对象 ${declared.size} 项" else "参数取自固定变量名"}）"
             )
-            validateAjax(ajaxJson)
+            validateAjax(ajaxJson, sentPwd = withPwd)
             val dom = ajaxJson.optString("dom")
             val rel = ajaxJson.optString("url")
             if (dom.isBlank() || rel.isBlank() || rel.startsWith("/") || rel.contains("://")) {
@@ -835,6 +867,55 @@ class LanzouApi(
         }
     }
 
+    /** 页面是否停在"请输入提取码"的表单上。 */
+    internal fun isLockedSharePage(html: String): Boolean =
+        html.contains("请输入密码") || html.contains("id=\"pwbox\"") ||
+            html.contains("input_password") || html.contains("密码不正确")
+
+    /** 记录 `Set-Cookie: name=value; Path=/...` 里的 name/value。 */
+    private fun captureSetCookie(host: String, header: String) {
+        val pair = header.substringBefore(';').trim()
+        val name = pair.substringBefore('=', "").trim()
+        val value = pair.substringAfter('=', "").trim()
+        if (name.isNotEmpty() && value.isNotEmpty()) setCookie(host, name, value)
+    }
+
+    /**
+     * 用提取码解锁分享页，返回解锁后的 HTML；没解开返回 null。
+     *
+     * 为什么不能只靠取链接口的 p 字段：浏览器是先把提取码**提交给分享页**，
+     * 服务端用会话记住"已解锁"，再取链。个人盘"先建分享再取链"这条路径上，
+     * 跳过提交这一步时服务端会回「请输入密码」，而我们把它翻译成了"提取码错误"。
+     * 这里照浏览器的做法走一遍：POST pwd → 逐跳跟随重定向 → 回收 Set-Cookie。
+     */
+    private fun unlockSharePage(shareUrl: String, pwd: String): String? {
+        var current = shareUrl
+        val body = FormBody.Builder().add("pwd", pwd).build()
+        repeat(4) {
+            val host = hostOf(current)
+            val origin = runCatching { URI(current) }.getOrNull()?.let { "${it.scheme}://${it.host}" }.orEmpty()
+            val request = Request.Builder()
+                .url(current)
+                .header("User-Agent", LanzouConstants.WEB_UA)
+                .header("Referer", shareUrl)
+                .apply { if (origin.isNotEmpty()) header("Origin", origin) }
+                .apply { val c = cookieHeader(host); if (c.isNotEmpty()) header("Cookie", c) }
+                .post(body)
+                .build()
+            noRedirect.newCall(request).execute().use { resp ->
+                resp.headers("Set-Cookie").forEach { captureSetCookie(host, it) }
+                if (resp.code in 300..399) {
+                    val loc = resp.header("Location") ?: return null
+                    current = absolutize(current, loc)
+                    return@use
+                }
+                val html = resp.body?.string().orEmpty()
+                return if (isLockedSharePage(html)) null else html
+            }
+        }
+        return null
+    }
+
     private fun fetchPageFollowingLanzou(url: String): String {
         var current = url
         val challenged = mutableSetOf<String>()
@@ -898,11 +979,20 @@ class LanzouApi(
         }
     }
 
-    private fun validateAjax(json: JSONObject) {
+    private fun validateAjax(json: JSONObject, sentPwd: Boolean = false) {
         if (json.optInt("zt", 0) == 1) return
         val inf = json.optString("inf")
         when {
-            inf.contains("密码") || inf.contains("提取码") -> throw IllegalStateException("蓝奏提取码错误，请检查后重新解析")
+            inf.contains("密码") || inf.contains("提取码") -> {
+                // 区分两种完全不同的情况：我们根本没带码（该提示"需要提取码"），
+                // 还是带了码被拒（才是"提取码错误"）。以前一律报后者，
+                // 于是从未输入过提取码的路径（个人盘取链）也会被告知"提取码错误"。
+                val needCode = !sentPwd && (inf.contains("请输入") || inf.contains("需要"))
+                throw IllegalStateException(
+                    if (needCode) "该分享需要提取码，请填写后重试"
+                    else "蓝奏提取码错误，请检查后重新解析"
+                )
+            }
             inf.contains("不存在") || inf.contains("取消") || inf.contains("过期") || inf.contains("删除") ->
                 throw IllegalStateException("蓝奏文件已取消分享或不存在")
             inf.contains("频繁") || inf.contains("次数") || inf.contains("稍后") ->
@@ -1008,9 +1098,13 @@ class LanzouApi(
             val origin = runCatching { URI(base) }.getOrNull()?.let { "${it.scheme}://${it.host}" } ?: base
             "$origin/${raw.trimStart('/')}"
         }
+        // 蓝奏有时把提取码放在链接里（`.../xxxx?pwd=abcd`）而 info.pwd 为空。
+        // 丢掉它会让后面的取链走"无密码"分支，服务端回「请输入密码」，
+        // 最终显示成「提取码错误」—— 用户根本没机会输入过任何提取码。
+        val codeFromUrl = Regex("""[?&]pwd=([A-Za-z0-9]+)""").find(url)?.groupValues?.get(1).orEmpty()
         return ShareInfo(
             shareUrl = url,
-            passcode = pwd,
+            passcode = pwd.ifBlank { codeFromUrl },
             pwdId = raw,
             title = "蓝奏云分享",
             expiredType = com.yunget.app.data.network.model.ShareExpire.UNKNOWN
@@ -1043,11 +1137,6 @@ class LanzouApi(
     internal fun stripNotes(html: String): String = html
         .replace(Regex("""<!--.*?-->""", RegexOption.DOT_MATCHES_ALL), "\n")
         .replace(Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL), "\n")
-
-    /** 读取未加引号的 JS 变量值（如 `var kdns = 0`）。 */
-    private fun jsVarRaw(html: String, name: String): String? =
-        Regex("""(?:var|let|const)\s+$name\s*=\s*([^;,\n\r]+)""").find(html)?.groupValues?.get(1)
-            ?.trim()?.trim('\'', '"')
 
     /** 页面若是 acw_sc__v2 校验页则返回应设置的 Cookie 值。 */
     private fun lanzouChallengeCookie(source: String): String? {
@@ -1216,3 +1305,47 @@ class LanzouApi(
     private fun firstNonBlank(vararg values: String): String =
         values.firstOrNull { !it.isNullOrBlank() }?.trim().orEmpty()
 }
+
+/**
+ * 分页请求返回 `zt` 之后该做什么。
+ *
+ * 这些组合都来自真实故障：已解锁的分享再带提取码会被判"密码错误"（应重试不带码）、
+ * 已经翻过页却被拒或限流（应保留已加载的列表）、首页就失败（才该报错）。
+ * 抽成纯函数是为了让每一种组合都能被单测钉住 —— 之前这段逻辑埋在 HTTP 循环里，
+ * 改动只能靠联网手测，于是同一个错误报了两轮。
+ */
+internal enum class FolderPageAction {
+    /** 本页有效，继续解析并翻下一页。 */
+    NEXT,
+
+    /** 没有下一页（或已翻过的页被拒）：保留已加载的内容，正常结束。 */
+    DONE,
+
+    /** 带着提取码被拒：去掉提取码重试同一页。 */
+    RETRY_WITHOUT_PWD,
+
+    /** 首页被限流：稍后重试。 */
+    RETRY_LATER,
+
+    /** 首页就报提取码错误：只有这种情况才该这么提示。 */
+    FAIL_PWD,
+
+    /** 首页就被限流且重试用尽。 */
+    FAIL_BUSY,
+
+    /** 首页返回无法解释的 zt。 */
+    FAIL_OTHER,
+}
+
+internal fun folderPageAction(zt: Int, firstPageDone: Boolean, pwdPresent: Boolean): FolderPageAction =
+    when (zt) {
+        1 -> FolderPageAction.NEXT
+        2 -> FolderPageAction.DONE
+        3 -> when {
+            pwdPresent -> FolderPageAction.RETRY_WITHOUT_PWD
+            firstPageDone -> FolderPageAction.DONE
+            else -> FolderPageAction.FAIL_PWD
+        }
+        4 -> if (firstPageDone) FolderPageAction.DONE else FolderPageAction.RETRY_LATER
+        else -> if (firstPageDone) FolderPageAction.DONE else FolderPageAction.FAIL_OTHER
+    }

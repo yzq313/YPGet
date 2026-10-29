@@ -278,4 +278,49 @@ class LanzouShareParseTest {
         assertTrue(guard.enter("https://b.lanzouj.com/file/x", ""))
         assertTrue(guard.enter("https://a.lanzouj.com/file/y", ""))
     }
+
+    /**
+     * 2.7.18：识别"停在提取码表单"的分享页。
+     *
+     * 这个判定是解锁流程的入口。以前它只出现在 resolveShare 里，取链路径完全不做判定，
+     * 于是"个人盘先建分享再取链"会拿着一份密码页去取参数，服务端回「请输入密码」，
+     * 最后被翻译成「蓝奏提取码错误」——用户根本没输入过提取码。
+     */
+    @Test
+    fun `识别停在提取码表单的分享页`() {
+        val locked = """<html><body><div class="pwdbox">请输入密码</div>
+            <input type="password" name="pwd" id="pwd"></body></html>"""
+        val wrong = """<html><body><span>密码不正确</span></body></html>"""
+        val unlocked = """<html><body><div class="filemoreajax"></div><iframe src="/fn?file=1"></iframe></body></html>"""
+        assertTrue(api.isLockedSharePage(locked))
+        assertTrue(api.isLockedSharePage(wrong))
+        assertFalse(api.isLockedSharePage(unlocked))
+    }
+
+    /**
+     * 2.7.19：分页返回码该落成什么动作。
+     *
+     * 这段判断以前埋在 HTTP 循环里，只能靠联网手测，于是同一个"提取码错误"报了两轮。
+     * 现在它是有返回值的纯函数，每种组合都能钉住。
+     */
+    @Test
+    fun `分页返回码决定下一步动作`() {
+        // 正常页 / 没有下一页
+        assertEquals(FolderPageAction.NEXT, folderPageAction(zt = 1, firstPageDone = false, pwdPresent = true))
+        assertEquals(FolderPageAction.DONE, folderPageAction(zt = 2, firstPageDone = true, pwdPresent = false))
+
+        // 密码错误：带着码先脱码重试；没带码且是首页才报错；翻过页则保留已有列表
+        assertEquals(FolderPageAction.RETRY_WITHOUT_PWD, folderPageAction(zt = 3, firstPageDone = false, pwdPresent = true))
+        assertEquals(FolderPageAction.RETRY_WITHOUT_PWD, folderPageAction(zt = 3, firstPageDone = true, pwdPresent = true))
+        assertEquals(FolderPageAction.FAIL_PWD, folderPageAction(zt = 3, firstPageDone = false, pwdPresent = false))
+        assertEquals(FolderPageAction.DONE, folderPageAction(zt = 3, firstPageDone = true, pwdPresent = false))
+
+        // 限流：首页重试，翻过页就收下已有结果
+        assertEquals(FolderPageAction.RETRY_LATER, folderPageAction(zt = 4, firstPageDone = false, pwdPresent = false))
+        assertEquals(FolderPageAction.DONE, folderPageAction(zt = 4, firstPageDone = true, pwdPresent = false))
+
+        // 无法解释的返回码：首页报错，否则保留已有结果
+        assertEquals(FolderPageAction.FAIL_OTHER, folderPageAction(zt = 9, firstPageDone = false, pwdPresent = false))
+        assertEquals(FolderPageAction.DONE, folderPageAction(zt = 9, firstPageDone = true, pwdPresent = false))
+    }
 }

@@ -18,6 +18,8 @@
 
 package com.yunget.app.ui.screens
 
+import com.yunget.app.data.download.EngineDefaults
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.clickable
@@ -107,8 +109,6 @@ fun EngineAdvancedScreen(
     var segmentsPerConnection by remember { mutableStateOf(repo.segmentsPerConnection) }
     var tailAssist by remember { mutableStateOf(repo.tailAssist) }
     var adaptiveConcurrency by remember { mutableStateOf(repo.adaptiveConcurrency) }
-    var overlapMerge by remember { mutableStateOf(repo.overlapMerge) }
-    var bufferedSegmentWrite by remember { mutableStateOf(repo.bufferedSegmentWrite) }
     var backpressureFailures by remember { mutableStateOf(repo.backpressureFailures) }
     var maxConnectionsPerHost by remember { mutableStateOf(repo.maxConnectionsPerHost) }
     var stallTimeoutSec by remember { mutableStateOf((repo.stallTimeoutMs / 1000L).toInt()) }
@@ -194,8 +194,6 @@ fun EngineAdvancedScreen(
                         segmentsPerConnection = 4
                         tailAssist = true
                         adaptiveConcurrency = true
-                        overlapMerge = false
-                        bufferedSegmentWrite = false
                         backpressureFailures = 0
                         maxConnectionsPerHost = 0
                         stallTimeoutSec = 45
@@ -217,22 +215,20 @@ fun EngineAdvancedScreen(
                         repo.segmentsPerConnection = 4
                         repo.tailAssist = true
                         repo.adaptiveConcurrency = true
-                        repo.overlapMerge = false
-                        repo.bufferedSegmentWrite = false
                         repo.backpressureFailures = 0
                         repo.maxConnectionsPerHost = 0
                         repo.stallTimeoutMs = 45_000L
                         repo.trustWeakValidator = false
                         repo.skipProbeWhenSizeKnown = true
-                        repo.engineBlockSizeBytes = 16L * 1024 * 1024
-                        repo.engineMinSegmentSizeBytes = 64L * 1024
-                        repo.engineMaxSegmentsPerTask = 0
-                        repo.engineMaxSplitsPerSegment = 2
-                        repo.engineConnectTimeoutMs = 15_000L
-                        repo.engineReadTimeoutMs = 60_000L
-                        repo.engineProbeTimeoutMs = 6_000L
-                        repo.engineProbeRetries = 1
-                        repo.engineSlowStartInitial = 0
+                        repo.engineBlockSizeBytes = EngineDefaults.BLOCK_SIZE
+                        repo.engineMinSegmentSizeBytes = EngineDefaults.MIN_SEGMENT_SIZE
+                        repo.engineMaxSegmentsPerTask = EngineDefaults.MAX_SEGMENTS_PER_TASK
+                        repo.engineMaxSplitsPerSegment = EngineDefaults.MAX_SPLITS_PER_SEGMENT
+                        repo.engineConnectTimeoutMs = EngineDefaults.CONNECT_TIMEOUT_MS
+                        repo.engineReadTimeoutMs = EngineDefaults.READ_TIMEOUT_MS
+                        repo.engineProbeTimeoutMs = EngineDefaults.PROBE_TIMEOUT_MS
+                        repo.engineProbeRetries = EngineDefaults.PROBE_RETRIES
+                        repo.engineSlowStartInitial = EngineDefaults.SLOW_START_INITIAL
                         repo.engineUserAgent = ""
                         repo.engineHttpVersionPolicy = 0
                     }) {
@@ -318,30 +314,6 @@ fun EngineAdvancedScreen(
                 accentIcon = Icons.Outlined.Warning
             )
 
-            // 6. 下载中预先合并
-            ParamSwitch(
-                title = "下载中预先合并",
-                description = "把完成的分片立刻写进目标文件，让合并 I/O 与网络等待重叠。" +
-                    "开启会增加磁盘写入量（每个分片写两次）。",
-                checked = overlapMerge,
-                onCheckedChange = {
-                    overlapMerge = it
-                    repo.overlapMerge = it
-                }
-            )
-
-            // 7. 分片缓冲写入
-            ParamSwitch(
-                title = "分片缓冲写入",
-                description = "分片先缓冲再落盘，减少小写入次数。机械盘/低速 SD 卡上更稳，" +
-                    "但在大内存设备上收益不明显。",
-                checked = bufferedSegmentWrite,
-                onCheckedChange = {
-                    bufferedSegmentWrite = it
-                    repo.bufferedSegmentWrite = it
-                }
-            )
-
             // 8. 背压降并发阈值
             ParamStepper(
                 title = "背压降并发阈值",
@@ -378,7 +350,7 @@ fun EngineAdvancedScreen(
             ParamStepper(
                 title = "停滞断开阈值",
                 description = "服务端接受连接却不发数据时，多久断开重试。" +
-                    "没有它就要一路等到读超时（默认 60 秒）。",
+                    "没有它就要一路等到读超时（默认 30 秒）。",
                 value = stallTimeoutSec,
                 range = 0..300,
                 step = 5,
@@ -467,7 +439,7 @@ fun EngineAdvancedScreen(
 
             ParamStepper(
                 title = "读超时",
-                description = "连上之后最多等多久数据（默认 60 秒）。它是兜底 —— " +
+                description = "连上之后最多等多久数据（默认 30 秒）。它是兜底 —— " +
                     "日常的「接了不发」由上面的停滞断开阈值先处理。",
                 value = readTimeoutSec,
                 range = 5..600,
